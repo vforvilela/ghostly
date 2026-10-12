@@ -35,6 +35,8 @@ import app.tauri.plugin.Plugin
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import kotlin.concurrent.thread
 
 @InvokeArg
@@ -90,6 +92,8 @@ class GhostlyHostPlugin(private val activity: Activity) : Plugin(activity) {
     private const val CHANNEL = "messages"
     /** At most this many files from one share, as a paste (clipboard.rs `MAX_PASTED_FILES`). */
     private const val MAX_SHARED_FILES = 32
+    /** The largest shared file copied: the page brings no larger one in (pastedFiles.ts `PLATFORM_PASTE_MAX`). */
+    private const val MAX_SHARED_BYTES = 256L * 1024 * 1024
   }
 
   /** Rust (src/android.rs): `kind` is "oidc", "share", "notification" or "network". */
@@ -161,7 +165,8 @@ class GhostlyHostPlugin(private val activity: Activity) : Plugin(activity) {
   /**
    * "Share to Ghostly" from another app: its text and its streams. Each stream is copied into the app's cache (a
    * folder per file, under the name the sharing app gave), off the main thread, then handed to Rust; the share before
-   * it is removed first. The page reads the copies by token, as a paste's.
+   * it is removed first. The page reads the copies by token, as a paste's. One larger than [MAX_SHARED_BYTES] is not
+   * copied (nor kept, where its size was not known before), only named in `leftOut`, for the page to say so.
    */
   private fun shared(intent: Intent) {
     val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() ?: ""
@@ -172,19 +177,31 @@ class GhostlyHostPlugin(private val activity: Activity) : Plugin(activity) {
     thread(name = "ghostly-share") {
       root.deleteRecursively()
       val files = JSONArray()
+      val leftOut = JSONArray()
       streams.forEachIndexed { index, uri ->
         try {
-          val name = displayName(uri)?.replace('/', '_')?.takeIf { it.isNotBlank() && it != "." && it != ".." }
+          val (shown, size) = nameAndSize(uri)
+          val name = shown?.replace('/', '_')?.takeIf { it.isNotBlank() && it != "." && it != ".." }
             ?: "shared-${index + 1}"
+          if (size != null && size > MAX_SHARED_BYTES) {
+            leftOut.put(name)
+            return@forEachIndexed
+          }
           val folder = File(root, index.toString()).apply { mkdirs() }
           val file = File(folder, name)
-          resolver.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } } ?: return@forEachIndexed
+          val whole = resolver.openInputStream(uri)?.use { input -> file.outputStream().use { copyAtMost(input, it, MAX_SHARED_BYTES) } }
+            ?: return@forEachIndexed
+          if (!whole) {
+            folder.deleteRecursively()
+            leftOut.put(name)
+            return@forEachIndexed
+          }
           files.put(JSONObject().put("path", file.path).put("mime", resolver.getType(uri) ?: JSONObject.NULL))
         } catch (e: Exception) {
           // One file that cannot be read (a revoked permission, a broken stream) leaves the rest of the share.
         }
       }
-      val share = JSONObject().put("title", title).put("text", text).put("files", files)
+      val share = JSONObject().put("title", title).put("text", text).put("files", files).put("leftOut", leftOut)
       activity.runOnUiThread { received("share", share.toString()) }
     }
   }
@@ -201,14 +218,33 @@ class GhostlyHostPlugin(private val activity: Activity) : Plugin(activity) {
       )
   }
 
-  private fun displayName(uri: Uri): String? {
-    if (uri.scheme == "file") return uri.lastPathSegment
+  /** The name and the size in bytes the sharing app gives a stream; either may be unknown. */
+  private fun nameAndSize(uri: Uri): Pair<String?, Long?> {
+    if (uri.scheme == "file") return uri.lastPathSegment to null
     return try {
-      activity.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
-        if (it.moveToFirst()) it.getString(0) else null
-      }
+      activity.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { row ->
+        if (!row.moveToFirst()) return null to null
+        val nameAt = row.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        val sizeAt = row.getColumnIndex(OpenableColumns.SIZE)
+        val name: String? = if (nameAt >= 0 && !row.isNull(nameAt)) row.getString(nameAt) else null
+        val size: Long? = if (sizeAt >= 0 && !row.isNull(sizeAt)) row.getLong(sizeAt) else null
+        Pair(name, size)
+      } ?: Pair(null, null)
     } catch (e: Exception) {
-      null
+      null to null
+    }
+  }
+
+  /** Copies `input` to `output` while it stays within `max` bytes: false, the copy cut short, once it holds more. */
+  private fun copyAtMost(input: InputStream, output: OutputStream, max: Long): Boolean {
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var copied = 0L
+    while (true) {
+      val read = input.read(buffer)
+      if (read < 0) return true
+      copied += read
+      if (copied > max) return false
+      output.write(buffer, 0, read)
     }
   }
 

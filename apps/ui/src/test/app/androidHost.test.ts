@@ -100,6 +100,35 @@ describe("a share from another app", () => {
     await vi.waitFor(() => expect(incomingShare()?.text).toBe("second"));
   });
 
+  it("names what was too large to bring in, even when that was all of it, and reads at most 256 MiB in all", async () => {
+    const MiB = 2 ** 20;
+    const shares = [
+      // A video Android left out before copying it, and one the page leaves out.
+      { title: "", text: "", files: [{ token: "paste-1", name: "VID_2.mp4", size: 300 * MiB, mime: "video/mp4" }], leftOut: ["VID_1.mp4"] },
+      // Each fits; together they would be 350 MiB: the one that would pass the total is left out.
+      { title: "", text: "", files: [
+        { token: "paste-2", name: "a.mov", size: 200 * MiB, mime: null },
+        { token: "paste-3", name: "b.mov", size: 100 * MiB, mime: null },
+        { token: "paste-4", name: "c.jpg", size: 50 * MiB, mime: null },
+      ] },
+    ];
+    const read: string[] = [];
+    const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "incoming_share_take") return shares.shift() ?? null;
+      if (command === "read_pasted_bytes") { read.push(args!.token as string); return new ArrayBuffer(0); }
+      throw new Error(command);
+    });
+    let arrived: () => void = () => {};
+    takeIncomingShares(invoke as never, vi.fn(async (_event: string, handler: () => void) => { arrived = handler; }));
+    await vi.waitFor(() => expect(location.hash).toBe("#/shared"));
+    expect(incomingShare()).toMatchObject({ files: [], leftOut: ["VID_1.mp4", "VID_2.mp4"] });
+
+    arrived();
+    await vi.waitFor(() => expect(incomingShare()?.files.map((file) => file.name)).toEqual(["a.mov", "c.jpg"]));
+    expect(incomingShare()?.leftOut).toEqual(["b.mov"]);
+    expect(read).not.toContain("paste-3");
+  });
+
   it("is nothing when none waits", async () => {
     const invoke = vi.fn(async () => null);
     takeIncomingShares(invoke as never, async () => undefined);

@@ -35,11 +35,15 @@ export function followAppVisibility(listen: ListenWith, doc: Document = document
   }).catch(() => {});
 }
 
-/** A share from another app as Rust hands it over: its text, and its files on the paste shelf, by token. */
+/**
+ * A share from another app as Rust hands it over: its text, its files on the paste shelf, by token, and the names of
+ * those Android did not copy, too large to bring in.
+ */
 interface Shared {
   title: string;
   text: string;
   files: { token: string; name: string | null; size: number; mime: string | null }[];
+  leftOut?: string[];
 }
 
 /**
@@ -103,15 +107,21 @@ export function followSystemBars(invoke: Invoke, root: HTMLElement = document.do
 
 /**
  * "Share to Ghostly" from another app: taken when the app starts (a share can be what started it) and whenever Rust
- * says one arrived. Its files are read whole into the page, as a paste's; one too large to paste is left out. The page
- * then shows the Share to… picker, as the web app's share target does.
+ * says one arrived. Its files are read whole into the page, as a paste's, at most a paste's size in all: one that would
+ * pass it is left out, and named. The page then shows the Share to… picker, as the web app's share target does.
  */
 export function takeIncomingShares(invoke: Invoke, listen: Listen): void {
   const take = async () => {
     const shared = await invoke<Shared | null>("incoming_share_take");
     if (!shared) return;
+    const leftOut = [...shared.leftOut ?? []];
+    let room = PLATFORM_PASTE_MAX;
     const clips: ClipboardFile[] = shared.files
-      .filter((file) => file.size <= PLATFORM_PASTE_MAX)
+      .filter((file) => {
+        if (file.size > room) { leftOut.push(file.name ?? ""); return false; }
+        room -= file.size;
+        return true;
+      })
       .map(({ token, ...file }) => ({
         ...file,
         read: async (offset: number, length: number) => {
@@ -121,7 +131,7 @@ export function takeIncomingShares(invoke: Invoke, listen: Listen): void {
         },
       }));
     const files = await readPlatformFiles(clips);
-    receiveShare({ title: shared.title, text: shared.text, url: "", files });
+    receiveShare({ title: shared.title, text: shared.text, url: "", files, leftOut });
     if (location.hash !== "#/shared") location.hash = "#/shared";
   };
   void listen("incoming-share", () => void take().catch(() => {})).catch(() => {});

@@ -144,8 +144,8 @@ pub fn system_bars(color: u32, dark: bool) -> Result<(), String> {
     call::<Value>("systemBars", json!({ "color": color, "dark": dark })).map(drop)
 }
 
-/// A share from another app, as the Kotlin side copied it: its text and the files it made of the shared streams, in
-/// the app's cache.
+/// A share from another app, as the Kotlin side copied it: its text, the files it made of the shared streams, in
+/// the app's cache, and the names of those it did not copy, too large to bring in.
 #[derive(Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct Shared {
     #[serde(default)]
@@ -154,6 +154,8 @@ pub struct Shared {
     pub text: String,
     #[serde(default)]
     pub files: Vec<SharedFile>,
+    #[serde(default, rename = "leftOut")]
+    pub left_out: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq)]

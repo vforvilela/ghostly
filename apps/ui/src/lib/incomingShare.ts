@@ -12,6 +12,8 @@ export interface IncomingShare {
   text: string;
   url: string;
   files: File[];
+  /** The names of files left out as too large to bring into the page (Android's share); the picker says so. */
+  leftOut?: string[];
 }
 
 let pending: IncomingShare | null = null;
@@ -19,14 +21,14 @@ const forChat = new Map<string, IncomingShare>();
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach((listener) => listener());
 
-/** Whether a share has anything in it at all. */
+/** Whether a share has anything in it for a chat. */
 export function isEmptyShare(share: IncomingShare): boolean {
   return !share.files.length && !share.text.trim() && !share.url.trim() && !share.title.trim();
 }
 
-/** A share arrived: it waits for a chat to be picked. An empty one is dropped. */
+/** A share arrived: it waits for a chat to be picked. An empty one is dropped, unless it says what was left out. */
 export function receiveShare(share: IncomingShare): void {
-  pending = isEmptyShare(share) ? null : share;
+  pending = isEmptyShare(share) && !share.leftOut?.length ? null : share;
   emit();
 }
 
