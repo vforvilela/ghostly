@@ -20,6 +20,13 @@ async function useLanguage(page: Page, language: string): Promise<void> {
 }
 
 const direction = (locator: Locator) => locator.evaluate((element) => getComputedStyle(element).direction);
+/** Space between a message's text and its time, whichever side the time is on. */
+const timeGap = (body: Locator) => body.evaluate((element) => {
+  const range = document.createRange();
+  range.selectNodeContents(element.querySelector('[data-testid="message-text"]')!);
+  const text = range.getBoundingClientRect(), time = element.querySelector(".msg-meta")!.getBoundingClientRect();
+  return Math.round(text.left >= time.right ? text.left - time.right : time.left - text.right);
+});
 
 test("on a phone: an English message reads left to right in the Arabic app, an Arabic one right to left in the English app", { tag: ["@feature:app.i18n", "@feature:app.mobile-layout"] }, async ({ peer }) => {
   const [alice, bob] = await Promise.all([peer("alice", { mobile: true, viewport: PHONE }), peer("bob", { mobile: true, viewport: PHONE })]);
@@ -37,6 +44,8 @@ test("on a phone: an English message reads left to right in the Arabic app, an A
   expect(await direction(chat(bob).getByTestId("message-body").filter({ hasText: `hello from ${bob.name}` }))).toBe("ltr");
   // One line: the time beside the text, not under it.
   expect((await arabic.boundingBox())!.height).toBeLessThan(40);
+  // With room between them: its gap went to the bubble's far side, the time touching the last letter.
+  expect(await timeGap(arabic)).toBeGreaterThanOrEqual(6);
 
   // Bob writes English: left to right in Alice's Arabic app.
   await say(bob, "It goes on and on.");
@@ -44,6 +53,7 @@ test("on a phone: an English message reads left to right in the Arabic app, an A
   await expect(english).toBeVisible();
   expect(await direction(english)).toBe("ltr");
   expect((await english.boundingBox())!.height).toBeLessThan(40);
+  expect(await timeGap(english)).toBeGreaterThanOrEqual(6);
 
   // The chat list's last line too.
   await alice.page.getByTestId("chat-back").click();
@@ -69,4 +79,18 @@ test("in Arabic the words on a wallet card keep the app's font, so their letters
     expect(font, part).not.toMatch(/mono/i);
   }
   expect(await card.locator(".wallet-deck-card-balance").evaluate((element) => getComputedStyle(element).fontFamily)).toMatch(/mono/i);
+});
+
+test("in Arabic a page's Back arrow points to the start edge, as it does in English", { tag: ["@feature:app.i18n"] }, async ({ peer }) => {
+  const { page } = await peer("ar-back");
+  const arrow = page.getByTestId("page-back").locator("svg");
+  // Tailwind mirrors with the `scale` property: "-1 1" when mirrored, "none" when not.
+  const mirrored = () => arrow.evaluate((element) => getComputedStyle(element).scale.startsWith("-1"));
+  await page.goto("/#/settings");
+  await expect(arrow).toBeVisible();
+  expect(await mirrored()).toBe(false);
+  // Right to left the button is at the right edge: its arrow points there, not into the page.
+  await useLanguage(page, "ar");
+  await expect(arrow).toBeVisible();
+  expect(await mirrored()).toBe(true);
 });

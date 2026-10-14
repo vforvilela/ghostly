@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { generateVapidKeys, type VapidKeys } from "@ghostly/core";
 import { engine } from "@ghostly/browser/platform/engine";
 import { databaseName } from "@ghostly/browser/shared/idb";
@@ -104,6 +104,28 @@ export async function setWake(on: boolean): Promise<void> {
   await engine.call("setWakeSubscription", { subscription: { ...keys, vapid } });
 }
 
+/**
+ * Whether notifications are no longer allowed for Ghostly, as a page that shows reads it. A page being closed reads
+ * "denied" whatever the person chose (the browser has let go of it while its scripts still run), and wake-ups turned
+ * off on that word stayed off. So a hidden page waits until it shows before it believes a refusal: one that is being
+ * closed never shows again, and one in the background decides when the person comes back to it.
+ */
+async function notificationsRefused(): Promise<boolean> {
+  const refused = () => typeof Notification !== "undefined" && Notification.permission !== "granted";
+  if (!refused()) return false;
+  if (document.visibilityState === "hidden") {
+    await new Promise<void>((resolve) => {
+      const shown = () => {
+        if (document.visibilityState === "hidden") return;
+        document.removeEventListener("visibilitychange", shown);
+        resolve();
+      };
+      document.addEventListener("visibilitychange", shown);
+    });
+  }
+  return refused();
+}
+
 let rotating: Promise<void> | null = null;
 
 /**
@@ -112,11 +134,15 @@ let rotating: Promise<void> | null = null;
  */
 export function rotateWake(): Promise<void> {
   rotating ??= (async () => {
-    const push = pushPlatform();
     // Another device's subscription is that device's to replace, never this one's (WISP 06 § Push and the phone).
-    if (!push || !engine.state?.settings.wake || engine.state.wakeOwner === "away") return;
+    const mine = () => (engine.state?.settings.wake && engine.state.wakeOwner !== "away" ? pushPlatform() : null);
+    if (!mine()) return;
+    const refused = await notificationsRefused();
+    // The wait for a hidden page to show may be long: wake-ups may have been turned off meanwhile.
+    const push = mine();
+    if (!push) return;
     const profile = activeProfileId();
-    if (typeof Notification !== "undefined" && Notification.permission !== "granted") {
+    if (refused) {
       await engine.call("setWakeSubscription", { subscription: null });
       await push.unsubscribe(profile);
       return;
@@ -140,17 +166,33 @@ export function useWakeTableSync(text: WakeWords): void {
   const links = state?.links;
   const groups = state?.groups;
   const words = JSON.stringify({ ...text, db: databaseName() });
+  // What the table is made of, as one string. The engine builds `links` and `groups` anew in every state (up to one
+  // every 50 ms while someone types or a file moves), so the arrays themselves say nothing about a change: written on
+  // them, the table was a database transaction per state.
+  const on = !!wake;
+  const held = links && JSON.stringify([
+    links.map((link) => [link.id, link.peerPubKeyZ32, link.wakeToken, !!link.wakeMuted]),
+    (groups ?? []).filter((group) => group.profile === "mesh").map((group) => [group.id, group.wakeTokens, !!group.wakeMuted]),
+  ]);
+  const latest = useRef({ links, groups });
+  latest.current = { links, groups };
   useEffect(() => {
     const push = pushPlatform();
-    if (!push || !links) return;
+    if (!push || !held) return;
     const profile = activeProfileId();
+    let muteEnds: ReturnType<typeof setTimeout> | undefined;
     const write = () => {
+      clearTimeout(muteEnds);
+      const { links, groups } = latest.current;
+      if (!links) return;
       const entries: WakeTableEntry[] = [];
-      if (wake) {
+      let soonest = Infinity;
+      if (on) {
         for (const link of links) {
           const chat = chatOfLink(link.id, links);
           if (!chat) continue;
           const until = mutedUntil(chat);
+          if (typeof until === "number") soonest = Math.min(soonest, until);
           // A muted chat is not woken at all: its contact is told to forget the subscription (the worker checks too).
           if (!!link.wakeMuted !== (until !== undefined)) void engine.call("setWakeMuted", { linkId: link.id, muted: until !== undefined }).catch(() => {});
           if (!link.wakeToken) continue;
@@ -160,22 +202,26 @@ export function useWakeTableSync(text: WakeWords): void {
         for (const group of groups ?? []) {
           if (group.profile !== "mesh") continue;
           const until = mutedUntil(groupChat(group.id));
+          if (typeof until === "number") soonest = Math.min(soonest, until);
           if (!!group.wakeMuted !== (until !== undefined)) void engine.call("setWakeMuted", { linkId: groupChat(group.id), muted: until !== undefined }).catch(() => {});
           for (const token of group.wakeTokens ?? []) entries.push({ token, path: groupPath(group.id), ...(until !== undefined && { mutedUntil: until }) });
         }
       }
       void push.syncTable(profile, entries, JSON.parse(words) as WakeWords).catch(() => {});
+      // A mute that ends by itself: the contact is told to wake this chat again when it does, with no state to wait for.
+      if (soonest !== Infinity) muteEnds = setTimeout(write, Math.min(Math.max(soonest - Date.now(), 0) + 50, 2 ** 31 - 1));
     };
     write();
     window.addEventListener(MUTE_EVENT, write);
     window.addEventListener("storage", write);
     window.addEventListener("session-updated", write);
     return () => {
+      clearTimeout(muteEnds);
       window.removeEventListener(MUTE_EVENT, write);
       window.removeEventListener("storage", write);
       window.removeEventListener("session-updated", write);
     };
-  }, [wake, links, groups, words]);
+  }, [on, held, words]);
 
   // A contact that held the subscription was deleted or muted: a new one (new endpoint, new key pair, new tokens for
   // the others), and the old one ends at the push service, so that contact can no longer wake this app. Not for
@@ -190,6 +236,7 @@ export function useWakeTableSync(text: WakeWords): void {
     const push = pushPlatform();
     if (!push || !wake) return;
     const profile = activeProfileId();
+    let stale = false;
     void push.current(profile).then(async (current) => {
       if (current?.endpoint === wake.endpoint) {
         // This browser's own: in a profile on several devices it names this device (made before it had a device set).
@@ -199,13 +246,17 @@ export function useWakeTableSync(text: WakeWords): void {
       // Another device's subscription, given to contacts while this device is active (WISP 06 § Push and the phone): it
       // is neither made again here nor turned off. This device has none of its own until the person turns it on here.
       if (owner === "away") return;
-      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      const allowed = typeof Notification !== "undefined" && !(await notificationsRefused());
+      // The wait for a hidden page to show may be long: a subscription or an owner that changed meanwhile has its own look.
+      if (stale) return;
+      if (allowed) {
         const keys = await push.subscribe(profile, wake.vapid);
         await engine.call("setWakeSubscription", { subscription: { ...keys, vapid: wake.vapid } });
       } else {
         await engine.call("setWakeSubscription", { subscription: null });
       }
     }).catch(() => {});
+    return () => { stale = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per subscription and owner
   }, [endpoint, owner]);
 }
@@ -236,7 +287,7 @@ export function useStandbyPush(text: WakeWords, on: boolean): void {
         if (!stored) return;
         const current = await push.current(profile);
         if (current?.endpoint === stored.endpoint && !stored.renew) return;
-        if (typeof Notification === "undefined" || Notification.permission !== "granted") {
+        if (typeof Notification === "undefined" || await notificationsRefused()) {
           await engine.call("devicePushSet", { subscription: null });
           return;
         }

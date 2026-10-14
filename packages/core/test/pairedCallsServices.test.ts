@@ -69,7 +69,7 @@ function pair(options: {
     const calls: string[] = [], heard: number[] = [];
     let lastServices: string[] = [];
     const endpoint: NativeEndpoint = {
-      transport: "iroh/1", descriptor: { name }, onConnection: null, onDescriptor: null,
+      transport: "iroh/1", descriptor: { id: name.repeat(64), relay: null, addresses: ["127.0.0.1:1"] }, onConnection: null, onDescriptor: null,
       close: async () => {},
       // Dialling the other side: it is told of its end, this side gets its own.
       connect: async (): Promise<BoundChannel> => {
@@ -83,7 +83,7 @@ function pair(options: {
     const link = new GhostLink({
       params: { ...params, profile: "paired-chat/1" },
       rtcAvailable: false,
-      native: { preferred: "iroh/1", fallback: false, peerDescriptors: { "iroh/1": { name: name === "a" ? "b" : "a" } }, peerTransports: ["iroh/1"] },
+      native: { preferred: "iroh/1", fallback: false, peerDescriptors: { "iroh/1": { id: (name === "a" ? "b" : "a").repeat(64), relay: null, addresses: ["127.0.0.1:1"] } }, peerTransports: ["iroh/1"] },
       pairing: { credentials: { seedB64: me.seedB64, peerKey: peer.pubKeyZ32, requireSignedSignals: true }, pinPeer: async () => {}, trustOnFirstUse: true },
       transport: { publish: async () => {}, resolve: async () => null, describe: () => ({ protocol: "memory", relays: [] }) },
       createPeerConnection: () => { throw new Error("The chat runs on Iroh here: no WebRTC"); },
@@ -415,5 +415,22 @@ describe("shared apps on a paired session (services/1)", () => {
     expect(a.presenceServices()).toEqual([]);
     expect(a.link.supportsServices).toBe(false);
     expect(localFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("paying a contact that said goodbye", () => {
+  it("is refused at once while the contact's app is gone", async () => {
+    const { a, b } = pair();
+    await live(a, b);
+    await vi.waitFor(() => expect(a.link.supportsPayments).toBe(true));
+    expect(a.link.contactAway).toBe(false);
+    // b's app stops: it says goodbye on the live session.
+    b.link.depart();
+    await vi.waitFor(() => expect(a.link.isDataLinkOpen).toBe(false));
+    expect(a.link.contactAway).toBe(true);
+    // Before, this dialled and waited out connect()'s 90 s for an app that had said it was going.
+    const started = Date.now();
+    await expect(a.link.requirePaymentSupport()).rejects.toThrow("Your contact is offline. Nothing was sent");
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 });

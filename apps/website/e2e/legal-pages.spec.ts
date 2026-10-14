@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { axe } from "./axe";
 
 // /terms and /privacy: they render with their titles, the footer and the sitemap list them, and the site sets no
 // cookie and loads nothing from an analytics or font service (the privacy policy says so).
@@ -13,6 +14,36 @@ for (const [path, title] of [
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(title);
     await expect(page.locator('link[rel="canonical"]')).toHaveAttribute("href", `https://ghostly.tools${path}`);
     await expect(page.locator("main")).not.toContainText(/\[(contact|city|state)[^\]]*\]/i);
+  });
+}
+
+// The two pages build their own shell (components/site/Legal.tsx), so they carry the skip link themselves: the first
+// Tab stop, as on every page with Shell. Without it a keyboard reader went through the whole nav before the text, on
+// the two longest pages the site has.
+for (const path of ["/terms", "/privacy"]) {
+  test(`${path}: the first Tab stop is the link that skips to the text`, async ({ page }) => {
+    await page.goto(path);
+    await page.keyboard.press("Tab");
+    const skip = page.locator(":focus");
+    await expect(skip).toHaveText("Skip to content");
+    await expect(skip).toHaveAttribute("href", "#content");
+    await expect(skip).toBeInViewport({ ratio: 1 });
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(new RegExp(`${path}#content$`));
+    // The next Tab goes on from the text, not from the nav above it.
+    await page.keyboard.press("Tab");
+    expect(await page.evaluate(() => !!document.activeElement?.closest("main#content"))).toBe(true);
+  });
+}
+
+// Every text of the two pages reads at AA contrast, the quiet "Last updated" line too, on a wide screen and on a phone.
+for (const path of ["/terms", "/privacy"]) {
+  test(`${path}: axe finds nothing serious, wide or on a phone`, async ({ page }) => {
+    for (const width of [1280, 375]) {
+      await page.setViewportSize({ width, height: 812 });
+      await page.goto(path, { waitUntil: "networkidle" });
+      expect(await axe(page), `${path} at ${width}px`).toEqual([]);
+    }
   });
 }
 
@@ -41,3 +72,24 @@ test("the site sets no cookie and asks no analytics or font service", async ({ p
   const base = new URL(page.url()).host;
   expect([...hosts].filter((h) => h !== base)).toEqual([]);
 });
+
+// The footer's loops (its rising ghosts and its ghost's SMIL hem) rest while the reader is far above it, as on every
+// page with Shell (components/site/IdleLoops.tsx), and run again once it is in view.
+for (const path of ["/terms", "/privacy"]) {
+  test(`${path} rests the footer's loops while the footer is off screen`, async ({ page }) => {
+    await page.goto(path);
+    const footer = page.locator("footer");
+    const loops = footer.locator(".particles, svg.ghost:not(svg svg)");
+    expect(await loops.count()).toBeGreaterThan(0);
+    const resting = () =>
+      footer.evaluate((el) =>
+        [...el.querySelectorAll(".particles, svg.ghost:not(svg svg)")].every(
+          (loop) => loop.hasAttribute("data-offscreen") && (!(loop instanceof SVGSVGElement) || loop.animationsPaused()),
+        ),
+      );
+    await expect.poll(resting).toBe(true);
+    await footer.scrollIntoViewIfNeeded();
+    await expect(loops.first()).not.toHaveAttribute("data-offscreen");
+    await expect.poll(resting).toBe(false);
+  });
+}

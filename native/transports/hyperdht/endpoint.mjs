@@ -2,7 +2,11 @@ import DHT from 'hyperdht'
 import { redial } from './redial.mjs'
 
 export const MAX_FRAME = 60 * 1024
+/** The top bit of a frame's length word: the frame is a binary message, not UTF-8 text (WISP 103). */
+const BINARY = 0x80000000
 const PREFACE = 'ghostly/paired-chat/1'
+/** How long a closing channel waits for what it sent last to go out before the stream is destroyed anyway. */
+const CLOSE_FLUSH_MS = 300
 
 /** Native UDP + NoiseSecretStream. The binding comes from the authenticated
  * stream itself, never from an application frame supplied by the other peer. */
@@ -22,6 +26,7 @@ export async function createHyperEndpoint(seed, options = {}) {
     let reader = null
     let closeHandler = null
     let closed = false
+    let ending = null
     let pending = []
     let buffer = Buffer.alloc(0)
     let preface = false
@@ -29,16 +34,19 @@ export async function createHyperEndpoint(seed, options = {}) {
     const ready = new Promise((resolve, reject) => { resolveOpen = resolve; rejectOpen = reject })
     const timer = setTimeout(() => { socket.destroy(new Error('HyperDHT handshake timed out')) }, 20000)
     const channel = {
+      // It carries binary messages (WISP 100 § Text and binary messages): a capability that needs them may be offered.
+      binary: true,
       get bufferedAmount() { return socket.writableLength || 0 },
       get onMessage() { return reader },
       set onMessage(value) { reader = value; if (value) for (const text of pending.splice(0)) value(text) },
       get onClose() { return closeHandler },
       set onClose(value) { closeHandler = value; if (closed) value?.() },
-      send(text) {
-        if (closed || typeof text !== 'string' || !text.length || Buffer.byteLength(text) > MAX_FRAME || this.bufferedAmount > 120 * 1024)
+      send(data) {
+        const binary = data instanceof Uint8Array
+        if (closed || !(binary || typeof data === 'string') || !data.length || (binary ? data.length : Buffer.byteLength(data)) > MAX_FRAME || this.bufferedAmount > 120 * 1024)
           throw new Error('Native channel is closed or exceeds its frame budget')
-        const payload = Buffer.from(text)
-        const header = Buffer.alloc(4); header.writeUInt32BE(payload.length)
+        const payload = binary ? Buffer.from(data.buffer, data.byteOffset, data.byteLength) : Buffer.from(data)
+        const header = Buffer.alloc(4); header.writeUInt32BE((binary ? BINARY : 0) + payload.length)
         socket.write(Buffer.concat([header, payload]))
       },
       drained() {
@@ -49,11 +57,22 @@ export async function createHyperEndpoint(seed, options = {}) {
           socket.once('drain', done); socket.once('close', gone)
         })
       },
-      close() { socket.destroy() },
+      // What was sent last (a goodbye, as an app stops) goes out before the stream ends: destroyed at once, it was
+      // dropped unsent. A contact that never finishes the stream has CLOSE_FLUSH_MS.
+      close() {
+        if (closed || ending) return ending ?? Promise.resolve()
+        ending = new Promise(resolve => { socket.once('close', resolve) })
+        const timer = setTimeout(() => socket.destroy(), CLOSE_FLUSH_MS)
+        timer.unref?.()
+        socket.end()
+        return ending
+      },
     }
     channels.add(channel)
     onChannel?.(channel)
     socket.on('error', error => rejectOpen(error))
+    // The contact ended its side (its channel closed): this one ends too, so the stream closes now, not on its timer.
+    socket.on('end', () => socket.end())
     socket.on('close', () => {
       closed = true; pending = []; clearTimeout(timer); channels.delete(channel)
       rejectOpen(new Error('Native channel closed')); closeHandler?.()
@@ -69,12 +88,17 @@ export async function createHyperEndpoint(seed, options = {}) {
       // before retaining a partial one; never allocate based on an unchecked size.
       buffer = Buffer.concat([buffer, chunk])
       while (buffer.length >= 4) {
-        const length = buffer.readUInt32BE(0)
-        if (length === 0 || length > MAX_FRAME) { socket.destroy(new Error('Invalid frame length')); return }
+        const word = buffer.readUInt32BE(0)
+        const binary = word >= BINARY, length = word % BINARY
+        // A binary frame before the preface is another protocol.
+        if (length === 0 || length > MAX_FRAME || (binary && !preface)) { socket.destroy(new Error('Invalid frame length')); return }
         if (buffer.length < 4 + length) break
         let text
-        try { text = new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(4, 4 + length)) }
-        catch { socket.destroy(new Error('Invalid UTF-8 frame')); return }
+        if (binary) text = new Uint8Array(buffer.subarray(4, 4 + length))
+        else {
+          try { text = new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(4, 4 + length)) }
+          catch { socket.destroy(new Error('Invalid UTF-8 frame')); return }
+        }
         buffer = buffer.subarray(4 + length)
         if (!preface) {
           if (text !== PREFACE) { socket.destroy(new Error('Unexpected application protocol')); return }
@@ -116,6 +140,7 @@ export async function createHyperEndpoint(seed, options = {}) {
           close() { if (counted) channels.delete(counted); socket.destroy() } }
       })
     },
-    async close() { stopped = true; for (const channel of channels) channel.close(); waiting.length = 0; await server.close(); await node.destroy() },
+    // The channels end first (their last frames out, CLOSE_FLUSH_MS at most): the node's socket goes with it.
+    async close() { stopped = true; const ended = [...channels].map(channel => channel.close()); waiting.length = 0; await Promise.all(ended); await server.close(); await node.destroy() },
   }
 }

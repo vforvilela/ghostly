@@ -7,13 +7,26 @@ import { useSyncExternalStore } from "react";
  * (the same sheet a paste or a drop opens, #349). Nothing is sent until the person sends it there.
  */
 
+/** A file of a share as the picker shows it: a browser's File, or one not read into the page yet. */
+export type SharedFile = Pick<File, "name" | "size" | "type">;
+
 export interface IncomingShare {
   title: string;
   text: string;
   url: string;
-  files: File[];
+  files: SharedFile[];
   /** The names of files left out as too large to bring into the page (Android's share); the picker says so. */
   leftOut?: string[];
+  /**
+   * Reads `files` into the page where they are only names and sizes (the Android app's share: its bytes are read
+   * when a chat's composer takes it, not before the picker shows). Without it, `files` are the Files.
+   */
+  read?: () => Promise<File[]>;
+}
+
+/** A share's files as Files, read now where they were not yet. */
+export function shareFiles(share: IncomingShare): Promise<File[]> {
+  return share.read ? share.read() : Promise.resolve(share.files.filter((file): file is File => file instanceof File));
 }
 
 let pending: IncomingShare | null = null;
@@ -26,9 +39,15 @@ export function isEmptyShare(share: IncomingShare): boolean {
   return !share.files.length && !share.text.trim() && !share.url.trim() && !share.title.trim();
 }
 
-/** A share arrived: it waits for a chat to be picked. An empty one is dropped, unless it says what was left out. */
+/**
+ * A share arrived: it waits for a chat to be picked. An empty one is dropped, and never clears one that waits; one
+ * that only names files left out as too large is said all the same, with the share that waits when there is one.
+ */
 export function receiveShare(share: IncomingShare): void {
-  pending = isEmptyShare(share) && !share.leftOut?.length ? null : share;
+  if (isEmptyShare(share)) {
+    if (!share.leftOut?.length) return;
+    pending = pending ? { ...pending, leftOut: [...pending.leftOut ?? [], ...share.leftOut] } : share;
+  } else pending = share;
   emit();
 }
 

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { engine } from "@ghostly/browser/platform/engine";
 import type { AppListedBy, AppPreview, AppRunStatus, AppSource, InstalledAppView } from "@ghostly/browser/engine/apps";
 import { useBackdropDismiss, useDialogFocus } from "../../hooks/useDismiss";
+import { useFocusBack } from "../../hooks/useFocusBack";
 import { useI18n, type Translate, type TranslationKey } from "../../contexts/I18nContext";
 import { Button } from "../wallet/ui";
 import { InfoButton } from "../layout";
@@ -36,11 +37,19 @@ function hostOf(url: string): string {
 }
 
 /** Where the app stands with the person's stores: "In <store>", "Found by <index>", "Not in any of your stores". */
-function storeLines(listedBy: readonly AppListedBy[], t: Translate): string[] {
+function storeLines(listedBy: readonly AppListedBy[], t: Translate, builtIn?: BuiltIn): string[] {
   const curated = listedBy.filter((s) => s.kind === "curated");
   if (curated.length) return curated.map((s) => t("apps.install.inStore", { name: s.name }));
-  return [...listedBy.map((s) => t("apps.install.foundBy", { name: s.name })), t("apps.install.notListed")];
+  const found = listedBy.map((s) => t("apps.install.foundBy", { name: s.name }));
+  if (builtIn) return builtIn === "installed" ? [...found, t("apps.builtIn.hint")] : found;
+  return [...found, t("apps.install.notListed")];
 }
+
+/**
+ * The version this client's own list pins (WISP 1200 § Built-in apps): the client vouches for it, so it carries no
+ * stranger's warning. `carried`: the install screen, which says "Comes with Ghostly" on its privacy line already.
+ */
+type BuiltIn = "carried" | "installed";
 
 /** Why it cannot run, if it cannot: revoked by its publisher, removed by a store, its files gone. */
 function runLine(run: AppRunStatus, t: Translate): string | null {
@@ -56,8 +65,9 @@ function Line({ children, tone = "muted", testId }: { children: ReactNode; tone?
 }
 
 /** The publisher and the stores, as a person checks them. */
-function Publisher({ fingerprint, unknown, listedBy, sentBy }: { fingerprint: string; unknown: boolean; listedBy: readonly AppListedBy[]; sentBy?: string }) {
+function Publisher({ fingerprint, unknown: unlisted, listedBy, sentBy, builtIn }: { fingerprint: string; unknown: boolean; listedBy: readonly AppListedBy[]; sentBy?: string; builtIn?: BuiltIn }) {
   const { t } = useI18n();
+  const unknown = unlisted && !builtIn;
   const [open, setOpen] = useState(false);
   const id = useId();
   return (
@@ -70,7 +80,7 @@ function Publisher({ fingerprint, unknown, listedBy, sentBy }: { fingerprint: st
         <span className="ms-auto"><Fingerprint value={fingerprint} /></span>
       </div>
       {unknown && open && <p id={id} className="text-xs text-text-secondary">{t("apps.install.unknownPublisherInfo")}</p>}
-      {storeLines(listedBy, t).map((line) => <Line key={line} testId="app-store-line">{line}</Line>)}
+      {storeLines(listedBy, t, builtIn).map((line) => <Line key={line} testId="app-store-line">{line}</Line>)}
       {sentBy && <Line testId="app-sent-by">{t("apps.install.sentBy", { name: sentBy })}</Line>}
     </div>
   );
@@ -126,9 +136,18 @@ function Permissions({ asks, update }: { asks: readonly string[]; update: boolea
  * the host the bundle comes from; for an app without `internet`, that its publisher may still learn the address. On
  * the web in WebKit (Safari, every browser on iPhone and iPad), one more line: any app can reach other servers there.
  */
-function Privacy({ from, internet }: { from?: string; internet: boolean }) {
+function Privacy({ from, internet, carried }: { from?: string; internet: boolean; carried?: boolean }) {
   const { t } = useI18n();
   const offline = internet ? "" : ` ${t("apps.install.ipInfoOffline")}`;
+  // Read from this copy of Ghostly (WISP 1200 § Built-in apps): no host saw anything, whatever URL it is published at.
+  if (carried) {
+    return (
+      <div className="space-y-2" data-testid="app-privacy">
+        <InfoLine testId="app-carried-line" info={t("apps.builtIn.carriedInfo")}>{t("apps.builtIn.carried")}</InfoLine>
+        {webKitAppLeak() && <InfoLine testId="app-webkit-line" info={t("apps.install.webkitInfo")}>{t("apps.install.webkit")}</InfoLine>}
+      </div>
+    );
+  }
   // Lines far enough apart that each ⓘ's tap area (wider than the icon) stays off the other's: 20 px apart, pressing
   // the IP line's ⓘ opened Safari's line.
   return (
@@ -163,9 +182,9 @@ function Head({ titleId, title, version, tagline, icon, installed }: { titleId: 
     <div className="flex items-center gap-3">
       <AppIcon size={48} icon={icon} installed={installed} />
       <div className="min-w-0">
-        <h2 id={titleId} className="text-lg font-medium text-text-primary truncate">{title}</h2>
+        <h2 id={titleId} dir="auto" className="text-lg font-medium text-text-primary break-words">{title}</h2>
         {version && <p className="text-xs text-text-muted">{t("apps.app.version", { version })}</p>}
-        {tagline && <p className="text-sm text-text-secondary">{tagline}</p>}
+        {tagline && <p dir="auto" className="text-sm text-text-secondary">{tagline}</p>}
       </div>
     </div>
   );
@@ -193,6 +212,7 @@ export function AppInstallDialog({ source, fetched, title, sentBy, onClose, onIn
   const [preview, setPreview] = useState<AppPreview | null>(fetched ?? null);
   const [error, setError] = useState<AppErrorView | null>(null);
   const [busy, setBusy] = useState(false);
+  const focusBack = useFocusBack(busy);
   const key = JSON.stringify(source);
   const have = !!fetched;
   // Fetched once per source: a new language while it loads must not fetch it again.
@@ -208,6 +228,7 @@ export function AppInstallDialog({ source, fetched, title, sentBy, onClose, onIn
 
   const install = async () => {
     if (!preview) return;
+    focusBack();
     setBusy(true); setError(null);
     try {
       const app = await engine.call("appInstall", { digest: preview.digest, grant: [...preview.manifest.permissions] });
@@ -228,11 +249,11 @@ export function AppInstallDialog({ source, fetched, title, sentBy, onClose, onIn
       {!preview && !error && <p className="text-sm text-text-muted" data-testid="app-install-checking">{t("apps.install.fetching")}</p>}
       {preview && (
         <>
-          <Publisher fingerprint={preview.fingerprint} unknown={preview.unknownPublisher} listedBy={preview.listedBy} sentBy={sentBy} />
-          {preview.manifest.description && <p className="text-sm text-text-secondary whitespace-pre-line">{preview.manifest.description}</p>}
+          <Publisher fingerprint={preview.fingerprint} unknown={preview.unknownPublisher} listedBy={preview.listedBy} sentBy={sentBy} builtIn={preview.carried && "carried"} />
+          {preview.manifest.description && <p dir="auto" className="text-sm text-text-secondary whitespace-pre-line">{preview.manifest.description}</p>}
           {!blocked && (preview.install === "new" || preview.asks.length > 0) && <Permissions asks={preview.asks} update={preview.install === "update"} />}
           {why && <Line tone="danger" testId="app-install-blocked">{why}</Line>}
-          <Privacy from={preview.from} internet={(preview.manifest.permissions as readonly string[]).includes("internet")} />
+          <Privacy from={preview.from} internet={(preview.manifest.permissions as readonly string[]).includes("internet")} carried={preview.carried} />
         </>
       )}
       {error && <ErrorLine error={error} testId="app-install-error" />}
@@ -240,7 +261,10 @@ export function AppInstallDialog({ source, fetched, title, sentBy, onClose, onIn
         <Button onClick={onClose}>{t("common.cancel")}</Button>
         {preview && !blocked && (
           <Button variant="primary" data-testid="app-install-confirm" disabled={busy} onClick={() => void install()}>
-            {preview.install === "update" ? t("apps.install.update") : openAfter ? t("apps.install.installOpen") : t("apps.install.install")}
+            {preview.install === "update" ? t("apps.install.update")
+              // A built-in app is already here: the button allows what it asks, it downloads nothing.
+              : preview.carried ? t(openAfter ? "apps.builtIn.allowOpen" : "apps.builtIn.allow")
+                : openAfter ? t("apps.install.installOpen") : t("apps.install.install")}
           </Button>
         )}
       </div>
@@ -266,7 +290,9 @@ export function InstalledAppDialog({ app, onClose, onOpen, onUninstalled }: {
   const [error, setError] = useState<AppErrorView | null>(null);
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const focusBack = useFocusBack(busy);
   const act = async (work: () => Promise<unknown>, close = false) => {
+    focusBack();
     setBusy(true); setError(null);
     try { await work(); await refreshInstalledApps(); if (close) onClose(); } catch (e) { setError(appErrorView(e, t)); } finally { setBusy(false); }
   };
@@ -280,7 +306,7 @@ export function InstalledAppDialog({ app, onClose, onOpen, onUninstalled }: {
         {error && <ErrorLine error={error} />}
         <div className="flex flex-wrap justify-end gap-2">
           <Button onClick={() => setRemoving(false)}>{t("common.cancel")}</Button>
-          <Button data-testid="app-export" disabled={busy} onClick={() => void act(async () => saveAppData(app.ref, await engine.call("appDataExport", { ref: app.ref })))}>{t("apps.app.export")}</Button>
+          <Button data-testid="app-export" disabled={busy} onClick={() => void act(async () => saveAppData(app.ref, await engine.call("appDataExportText", { ref: app.ref })))}>{t("apps.app.export")}</Button>
           <Button variant="danger" data-testid="app-uninstall-confirm" disabled={busy} onClick={() => void act(async () => { await engine.call("appUninstall", { ref: app.ref }); onUninstalled?.(); }, true)}>{t("apps.app.uninstall")}</Button>
         </div>
       </Shell>
@@ -289,8 +315,8 @@ export function InstalledAppDialog({ app, onClose, onOpen, onUninstalled }: {
   return (
     <Shell titleId={titleId} onClose={onClose} testId="app-details">
       <Head titleId={titleId} title={app.title} version={app.version} tagline={app.tagline} installed={app} />
-      <Publisher fingerprint={app.fingerprint} unknown={app.unknownPublisher} listedBy={app.listedBy} />
-      {app.description && <p className="text-sm text-text-secondary whitespace-pre-line">{app.description}</p>}
+      <Publisher fingerprint={app.fingerprint} unknown={app.unknownPublisher} listedBy={app.listedBy} builtIn={app.builtIn && "installed"} />
+      {app.description && <p dir="auto" className="text-sm text-text-secondary whitespace-pre-line">{app.description}</p>}
       {why && <Line tone={app.run.status === "needs-files" ? "warning" : "danger"} testId="app-run-line">{why}</Line>}
       {app.equivocation && <Line tone="warning" testId="app-equivocation">{t("apps.install.equivocation", { sequence: String(app.equivocation.sequence) })}</Line>}
       {app.pending && (

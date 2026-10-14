@@ -14,6 +14,8 @@ import { sanitizeNick } from "./text";
 export const LIMITS = {
   /** Largest control frame accepted, headers included. */
   maxControlFrameBytes: 60 * 1024,
+  /** Longest payment endpoint value (a Cashu token, an invoice) a payment frame may carry; a longer one is dropped. */
+  maxPaymentEndpointChars: 32 * 1024,
   /** Largest DataChannel message sent. 16 KiB is safe across WebRTC stacks. */
   maxChunkMessageBytes: 16 * 1024,
   maxRequestBodyBytes: 8 * 1024 * 1024,
@@ -259,7 +261,7 @@ function isEndpoint(value: unknown): value is WireEndpoint {
     value[0].length <= 64 &&
     /^[a-z0-9][a-z0-9-]*(?:\/[1-9][0-9]*)?$/.test(value[0]) &&
     typeof value[1] === "string" &&
-    value[1].length <= 32 * 1024
+    value[1].length <= LIMITS.maxPaymentEndpointChars
   );
 }
 
@@ -372,6 +374,11 @@ export interface FrameChannel {
    * WebRTC data channel does, and a sender only keeps under `LIMITS.sendHighWaterMark`.
    */
   readonly sendBudget?: number;
+  /**
+   * It carries binary messages as well as text (WISP 100 § Text and binary messages): a WebRTC data channel does.
+   * Absent: text only, as the Iroh channels are, and nothing binary is offered or sent on it.
+   */
+  readonly binary?: boolean;
   close(): void;
   onMessage: ((data: string | Uint8Array) => void) | null;
   onClose: (() => void) | null;
@@ -405,6 +412,7 @@ export function wrapDataChannel(dc: RTCDataChannel): FrameChannel {
     close() {
       dc.close();
     },
+    binary: true,
     onMessage: null,
     onClose: null,
   };

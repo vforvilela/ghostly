@@ -45,7 +45,12 @@ test("install from a store, open it in a chat, and the contact installs it from 
   await expect(ana.page.getByTestId("apps-add-store")).toContainText(store.storeName);
   await ana.page.getByTestId("apps-add-store-confirm").click();
   const listed = ana.page.getByTestId("app-store").filter({ hasText: store.storeName });
-  await listed.getByRole("button", { name: new RegExp(store.storeName) }).click();
+  // The store's app is on the page without opening anything, on a phone's width too; the store's name says it is open.
+  await expect(listed.getByRole("button", { name: new RegExp(store.storeName) })).toHaveAttribute("aria-expanded", "true");
+  const wide = ana.page.viewportSize()!;
+  await ana.page.setViewportSize({ width: 375, height: 700 });
+  await expect(listed.getByTestId("app-listing-install")).toBeInViewport();
+  await ana.page.setViewportSize(wide);
   await listed.getByTestId("app-listing-install").click();
 
   const screen = ana.page.getByTestId("app-install");
@@ -177,4 +182,25 @@ test("in Safari the install screen's two ⓘ each open their own line, even when
     await ana.page.mouse.click(again.x + again.width / 2, again.y + again.height / 2);
     await expect(screen.getByTestId(`${line}-text`)).toHaveCount(0);
   }
+});
+
+test("on a phone the install screen and the app's screen show its whole title, over two lines if need be", { tag: ["@feature:apps.page"] }, async ({ peer }) => {
+  // Titles may be 40 characters long; the heading was cut to one line at 375 px ("Chess Tournament Organizer fo…") on the
+  // one screen where a person decides to install it.
+  const title = "Chess Tournament Organizer for Friends!";
+  const store = await testStore({ title });
+  const ana = await peer("ana-phone", { mobile: true, viewport: { width: 375, height: 740 } });
+  await serveStore(ana.context, store);
+  await ana.page.goto("/#/apps");
+  await ana.page.getByTestId("apps-add").click();
+  await ana.page.getByTestId("apps-add-url").fill(APP_URL);
+  await ana.page.getByTestId("apps-add-check").click();
+  const whole = (screen: string) => ana.page.getByTestId(screen).getByRole("heading", { name: title })
+    .evaluate((el) => el.scrollWidth <= el.clientWidth + 1 && el.getBoundingClientRect().right <= innerWidth);
+  await expect(ana.page.getByTestId("app-install-confirm")).toBeVisible();
+  expect(await whole("app-install")).toBe(true);
+  await ana.page.getByTestId("app-install-confirm").click();
+  await ana.page.getByTestId("installed-app").getByRole("button", { name: `${title}: details` }).click();
+  await expect(ana.page.getByTestId("app-details")).toBeVisible();
+  expect(await whole("app-details")).toBe(true);
 });

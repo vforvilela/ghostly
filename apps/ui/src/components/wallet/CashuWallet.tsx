@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { decodeBolt11, parseLightningDestination, paymentUri, type PaymentReview as Review } from "@ghostly/core";
 import type { WalletPlatform, WalletState } from "../../lib/platform";
 import { useCountUp } from "../../hooks/useCountUp";
@@ -113,6 +113,16 @@ export function CashuWallet({ wallet, state, rail, onOpenCashu, focusAmount = fa
     try { return [parseLightningDestination(payInput)?.text ?? null, ""] as const; } catch (e) { return [null, problemText(e, t).title] as const; }
   })();
 
+  // The invoice and the quote take the place of the form that had the focus: the focus goes to their first line, so the
+  // keys go on from there (to Copy, to Pay) and a screen reader says what came. Not when it went somewhere else meanwhile.
+  const invoiceLine = useRef<HTMLParagraphElement>(null);
+  const quoteLine = useRef<HTMLParagraphElement>(null);
+  const showing = invoice ? "invoice" : quote ? "quote" : null;
+  useEffect(() => {
+    const line = showing === "invoice" ? invoiceLine.current : showing === "quote" ? quoteLine.current : null;
+    if (line && (!document.activeElement || document.activeElement === document.body)) line.focus();
+  }, [showing]);
+
   const choose = (next: Action) => { setAction(next); setActionChosen(true); setError(""); setNotice(""); setInvoice(null); setQuote(null); setConfirming(false); };
 
   return (
@@ -123,7 +133,7 @@ export function CashuWallet({ wallet, state, rail, onOpenCashu, focusAmount = fa
             <span className="text-4xl font-semibold tabular-nums">{formatAmount(testnet ? testShown : realShown, t.language)}</span>
             <span className="text-text-muted text-sm ms-2">{unit}</span>
             {/* A Testnet wallet's whole balance is test sats; a test mint's sats never count in a Mainnet one. */}
-            {testMint && !testnet && <span className="block text-xs text-yellow-500 mt-1" data-testid="wallet-test-balance">{t("wallet.cashu.testBalance", { amount: formatAmount(testShown, t.language) })}</span>}
+            {testMint && !testnet && <span className="block text-xs text-warn-ink mt-1" data-testid="wallet-test-balance">{t("wallet.cashu.testBalance", { amount: formatAmount(testShown, t.language) })}</span>}
             {!!state.setAside && (
               <span className="mt-1 flex items-center gap-1.5 text-xs text-text-muted" data-testid="wallet-set-aside">
                 {t("wallet.cashu.setAside", { amount: formatAmount(state.setAside, t.language), unit })}
@@ -135,7 +145,7 @@ export function CashuWallet({ wallet, state, rail, onOpenCashu, focusAmount = fa
             )}
             {!!state.setAside && setAsideInfo && <span className="mt-1 block text-xs text-text-secondary" data-testid="wallet-set-aside-text">{t("wallet.cashu.setAsideInfo")}</span>}
             {!!state.unconfirmed && (
-              <span className="mt-1 flex items-center gap-1.5 text-xs text-yellow-500" data-testid="wallet-unconfirmed">
+              <span className="mt-1 flex items-center gap-1.5 text-xs text-warn-ink" data-testid="wallet-unconfirmed">
                 {t("wallet.cashu.unconfirmed", { amount: formatAmount(state.unconfirmed, t.language), unit })}
                 <button type="button" data-testid="wallet-unconfirmed-info" aria-expanded={unconfirmedInfo} aria-label={t("common.moreInfo")} title={t("common.moreInfo")} onClick={() => setUnconfirmedInfo(!unconfirmedInfo)}
                   className="relative grid h-5 w-5 shrink-0 cursor-pointer place-items-center rounded-full text-text-muted transition-colors hover:text-accent aria-expanded:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent before:absolute before:-inset-2.5 before:content-['']">
@@ -149,7 +159,7 @@ export function CashuWallet({ wallet, state, rail, onOpenCashu, focusAmount = fa
           <p className="text-text-primary" data-testid="wallet-balance">
             <span className="text-4xl font-semibold tabular-nums">{ln?.balance === undefined ? "—" : formatAmount(ln.balance, t.language)}</span>
             <span className="text-text-muted text-sm ms-2">{t("wallet.lightning.balanceSource", { unit, source: sourceName ?? t("wallet.lightning.theSource") })}</span>
-            {ln?.status !== "ready" && <span className="block text-xs text-yellow-500 mt-1" data-testid="lightning-source-state">{ln?.error ? problemLine(ln.error, t) : t("wallet.lightning.connecting")}</span>}
+            {ln?.status !== "ready" && <span className="block text-xs text-warn-ink mt-1" data-testid="lightning-source-state">{ln?.error ? problemLine(ln.error, t) : t("wallet.lightning.connecting")}</span>}
           </p>
         )}
         <Actions value={action} onChange={choose} actions={rail === "cashu" ? ["receive", "send", "history"] : ["receive", "send"]} />
@@ -166,7 +176,7 @@ export function CashuWallet({ wallet, state, rail, onOpenCashu, focusAmount = fa
               </div>
             ) : invoice ? (
               <div className="space-y-3">
-                <p className="text-text-primary text-sm">{fillNodes(t("wallet.cashu.invoiceFor"), { amount: <b>{sats(Number(amount))}</b> })}</p>
+                <p ref={invoiceLine} tabIndex={-1} className="text-text-primary text-sm focus:outline-none">{fillNodes(t("wallet.cashu.invoiceFor"), { amount: <b>{sats(Number(amount))}</b> })}</p>
                 <Address value={invoice} uri={paymentUri({ kind: "lightning", invoice })} testId="wallet-invoice" note={testnet && viaMint ? t("wallet.cashu.testMintInvoice") : t("wallet.lightning.waiting")}
                   actions={<button type="button" className="px-3 py-1.5 min-h-9 max-md:min-h-11 rounded-lg text-xs font-bold bg-black/20 hover:bg-black/30 transition-colors cursor-pointer" onClick={() => setInvoice(null)}>{t("wallet.cashu.newAmount")}</button>} />
               </div>
@@ -184,7 +194,7 @@ export function CashuWallet({ wallet, state, rail, onOpenCashu, focusAmount = fa
           <div className="bg-surface rounded-xl p-4 space-y-3 animate-fade-in">
             {quote ? (
               <>
-                <p className="text-text-primary text-sm">{fillNodes(t("wallet.cashu.payLine"), {
+                <p ref={quoteLine} tabIndex={-1} className="text-text-primary text-sm focus:outline-none">{fillNodes(t("wallet.cashu.payLine"), {
                   amount: <b>{sats(quote.amount)}</b>,
                   fees: <span className="text-text-muted"> {t("wallet.lightning.feesUpTo", { fee: formatAmount(quote.feeReserve, t.language) })}</span>,
                 })}</p>
@@ -223,7 +233,8 @@ export function CashuWallet({ wallet, state, rail, onOpenCashu, focusAmount = fa
               <span>{state.history.length === 0 ? t("wallet.cashu.history.none") : state.history.length === 1 ? t("wallet.cashu.history.movementsOne") : t("wallet.cashu.history.movements", { count: state.history.length })}</span>
               <span data-testid="wallet-fees-paid">{t("wallet.cashu.history.feesPaid", { amount: formatAmount(state.feesPaid, t.language), unit })}</span>
             </div>
-            <div className="max-h-80 overflow-y-auto divide-y divide-border">
+            {/* Scrolls past a few movements: focusable, so the keys scroll it in WebKit too (as in PayExternally). */}
+            <div tabIndex={0} aria-label={t("wallet.ui.history")} className="max-h-80 overflow-y-auto divide-y divide-border rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
               {state.history.map((tx) => {
                 const incoming = tx.kind === "lightning-in" || tx.kind === "ecash-in" || tx.kind === "reclaimed";
                 const mint = state.mints.find((m) => m.url === tx.mint);
@@ -235,7 +246,7 @@ export function CashuWallet({ wallet, state, rail, onOpenCashu, focusAmount = fa
                     </div>
                     <div className="flex items-baseline justify-between gap-2 text-xs text-text-muted">
                       <span className="truncate">{formatAt(tx.timestamp, MOVED_AT, t.language)} · {mint?.name ?? new URL(tx.mint).hostname}{tx.note ? ` · ${ENGINE_NOTES[tx.note] ? t(ENGINE_NOTES[tx.note]) : tx.note}` : ""}</span>
-                      <span className={`shrink-0 ${tx.fee > 0 ? "text-yellow-500" : ""}`}>{tx.fee > 0 ? t("wallet.cashu.history.fee", { amount: formatAmount(tx.fee, t.language) }) : t("wallet.cashu.history.noFee")}</span>
+                      <span className={`shrink-0 ${tx.fee > 0 ? "text-warn-ink" : ""}`}>{tx.fee > 0 ? t("wallet.cashu.history.fee", { amount: formatAmount(tx.fee, t.language) }) : t("wallet.cashu.history.noFee")}</span>
                     </div>
                   </div>
                 );

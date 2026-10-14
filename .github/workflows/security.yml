@@ -14,10 +14,11 @@ on:
 permissions:
   contents: read
 
-# As in ci.yml: a new push to a pull request cancels the run it supersedes; pushes, the morning scan and manual
-# runs each get a group of their own and are never cancelled.
+# As in ci.yml: a new push to a pull request cancels the run it supersedes; pushes to dev share one group, so a batch
+# the merge train lands (a push per pull request) scans at most twice; other pushes, the morning scan and manual runs
+# each get a group of their own and are never cancelled.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref == 'refs/heads/dev' && 'push-dev' || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -29,11 +30,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
 
-      # package-lock.json, apps/website/package-lock.json and Cargo.lock against osv.dev.
+      # Every lockfile that ships (LOCKFILES in the script: the root's, the site's, the HyperDHT sidecar's and
+      # relay's, Iroh for browsers') against osv.dev.
       # Accepted advisories live in .github/security-allowlist.json, each with an expiry.
       - name: Scan lock files
         run: node tools/scripts/security-scan.mjs

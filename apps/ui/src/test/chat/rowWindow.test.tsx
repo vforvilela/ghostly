@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { MAX_ROWS, OPEN_ROWS, PAGE_ROWS, revealMessage, useRowWindow } from "../../hooks/useRowWindow";
+import { AROUND_ROWS, MAX_ROWS, OPEN_ROWS, PAGE_ROWS, revealMessage, useRowWindow } from "../../hooks/useRowWindow";
 
 // covers: chat.scroll
 
@@ -9,6 +9,8 @@ import { MAX_ROWS, OPEN_ROWS, PAGE_ROWS, revealMessage, useRowWindow } from "../
 /** Row keys `from` to `to - 1`. */
 const rows = (to: number, from = 0) => Array.from({ length: to - from }, (_, i) => `m${from + i}`);
 const range = (w: { from: number; to: number }) => [w.from, w.to];
+/** Pages up from the open rows that fill the window to its most. */
+const FILL = Math.ceil((MAX_ROWS - OPEN_ROWS) / PAGE_ROWS);
 
 describe("useRowWindow", () => {
   it("opens on the last rows, attached to the end", () => {
@@ -33,17 +35,17 @@ describe("useRowWindow", () => {
 
   it("takes a page more above, and past the most rows lets the bottom ones go", () => {
     const { result } = renderHook(() => useRowWindow(rows(5_000), "chat-1"));
-    for (let page = 1; page <= 2; page++) {
+    for (let page = 1; page <= FILL; page++) {
       act(() => { expect(result.current.more("up")).toBe(true); });
       expect(range(result.current)).toEqual([5_000 - OPEN_ROWS - page * PAGE_ROWS, 5_000]);
     }
     act(() => { result.current.more("up"); });
-    const from = 5_000 - OPEN_ROWS - 3 * PAGE_ROWS;
+    const from = 5_000 - OPEN_ROWS - (FILL + 1) * PAGE_ROWS;
     expect(range(result.current)).toEqual([from, from + MAX_ROWS]);
     expect(result.current.detached).toBe(true);
     // A message arriving now is not drawn: the window is up the history.
     const { result: grown, rerender } = renderHook(({ ids }) => useRowWindow(ids, "chat-2"), { initialProps: { ids: rows(5_000) } });
-    for (let i = 0; i < 4; i++) act(() => { grown.current.more("up"); });
+    for (let i = 0; i < FILL + 1; i++) act(() => { grown.current.more("up"); });
     const held = range(grown.current);
     rerender({ ids: rows(5_001) });
     expect(range(grown.current)).toEqual(held);
@@ -51,39 +53,63 @@ describe("useRowWindow", () => {
 
   it("takes a page more below while detached, letting the top ones go, and attaches again at the end", () => {
     const { result } = renderHook(() => useRowWindow(rows(1_000), "chat-1"));
-    for (let i = 0; i < 5; i++) act(() => { result.current.more("up"); });
+    for (let i = 0; i < FILL + 2; i++) act(() => { result.current.more("up"); });
     const [from, to] = range(result.current);
     expect(to - from).toBe(MAX_ROWS);
     act(() => { result.current.more("down"); });
     expect(range(result.current)).toEqual([from + PAGE_ROWS, to + PAGE_ROWS]);
-    for (let i = 0; i < 10; i++) act(() => { result.current.more("down"); });
+    for (let i = 0; i < 2 * (FILL + 2); i++) act(() => { result.current.more("down"); });
     expect(result.current.to).toBe(1_000);
     expect(result.current.detached).toBe(false);
     expect(result.current.more("down")).toBe(false);
   });
 
-  it("at the end with more than its most rows (messages that came while open), trims to the last rows; otherwise leaves them", () => {
-    const { result, rerender } = renderHook(({ ids }) => useRowWindow(ids, "chat-1"), { initialProps: { ids: rows(50) } });
-    rerender({ ids: rows(50 + MAX_ROWS) });
-    expect(range(result.current)).toEqual([0, 50 + MAX_ROWS]);
-    let trimmed = false;
-    act(() => { trimmed = result.current.trim(); });
-    expect(trimmed).toBe(true);
-    expect(range(result.current)).toEqual([50 + MAX_ROWS - OPEN_ROWS, 50 + MAX_ROWS]);
+  it("at the bottom, a batch at the end past its most rows draws only the last rows, never the whole batch", () => {
+    const drawn: number[] = [];
+    const { result, rerender } = renderHook(({ ids }) => {
+      const w = useRowWindow(ids, "chat-1");
+      drawn.push(w.to - w.from);
+      return w;
+    }, { initialProps: { ids: rows(5_000) } });
+    expect(range(result.current)).toEqual([5_000 - OPEN_ROWS, 5_000]);
+    rerender({ ids: rows(8_000) });
+    expect(range(result.current)).toEqual([8_000 - OPEN_ROWS, 8_000]);
     expect(result.current.detached).toBe(false);
-    // As many as the most, or up the history: nothing goes.
-    act(() => { trimmed = result.current.trim(); });
-    expect(trimmed).toBe(false);
-    for (let i = 0; i < 4; i++) act(() => { result.current.more("up"); });
-    const held = range(result.current);
-    act(() => { trimmed = result.current.trim(); });
-    expect(trimmed).toBe(false);
-    expect(range(result.current)).toEqual(held);
+    expect(Math.max(...drawn)).toBeLessThanOrEqual(MAX_ROWS);
+    // A few more at a time keep it at the end, past the most rows too (a chat left open at its bottom all day).
+    let ids = rows(8_000);
+    for (let i = 0; i < MAX_ROWS; i++) { ids = rows(ids.length + 1); rerender({ ids }); }
+    expect(result.current.to).toBe(ids.length);
+    expect(Math.max(...drawn)).toBeLessThanOrEqual(MAX_ROWS);
+  });
+
+  it("up from the bottom, a batch at the end stays below the window, which keeps its rows", () => {
+    let bottom = true;
+    const drawn: number[] = [];
+    const { result, rerender } = renderHook(({ ids }) => {
+      const w = useRowWindow(ids, "chat-1");
+      w.watch(() => bottom);
+      drawn.push(w.to - w.from);
+      return w;
+    }, { initialProps: { ids: rows(5_000) } });
+    act(() => { result.current.more("up"); });
+    expect(range(result.current)).toEqual([5_000 - OPEN_ROWS - PAGE_ROWS, 5_000]);
+    bottom = false;
+    // Under the most rows, still drawn: the window reaches the end.
+    const end = 5_000 + MAX_ROWS - OPEN_ROWS - PAGE_ROWS;
+    rerender({ ids: rows(end) });
+    expect(range(result.current)).toEqual([5_000 - OPEN_ROWS - PAGE_ROWS, end]);
+    rerender({ ids: rows(8_000) });
+    expect(range(result.current)).toEqual([5_000 - OPEN_ROWS - PAGE_ROWS, end]);
+    expect(result.current.detached).toBe(true);
+    expect(Math.max(...drawn)).toBeLessThanOrEqual(MAX_ROWS);
+    act(() => result.current.attach(true));
+    expect(range(result.current)).toEqual([8_000 - OPEN_ROWS, 8_000]);
   });
 
   it("goes back to the last rows on attach", () => {
     const { result } = renderHook(() => useRowWindow(rows(2_000), "chat-1"));
-    for (let i = 0; i < 6; i++) act(() => { result.current.more("up"); });
+    for (let i = 0; i < FILL + 2; i++) act(() => { result.current.more("up"); });
     expect(result.current.detached).toBe(true);
     act(() => result.current.attach(true));
     expect(range(result.current)).toEqual([2_000 - OPEN_ROWS, 2_000]);
@@ -94,18 +120,18 @@ describe("useRowWindow", () => {
     let found = false;
     act(() => { found = revealMessage("m1234"); });
     expect(found).toBe(true);
-    expect(range(result.current)).toEqual([1_234 - PAGE_ROWS, 1_234 + PAGE_ROWS + 1]);
+    expect(range(result.current)).toEqual([1_234 - AROUND_ROWS, 1_234 + AROUND_ROWS + 1]);
     expect(result.current.detached).toBe(true);
     // One drawn already stays where it is; one no timeline has is not found.
     act(() => { found = revealMessage("m1200"); });
-    expect(range(result.current)).toEqual([1_234 - PAGE_ROWS, 1_234 + PAGE_ROWS + 1]);
+    expect(range(result.current)).toEqual([1_234 - AROUND_ROWS, 1_234 + AROUND_ROWS + 1]);
     act(() => { found = revealMessage("elsewhere"); });
     expect(found).toBe(false);
   });
 
   it("opens around the message it was left on", () => {
     const { result } = renderHook(() => useRowWindow(rows(9_000), "chat-1", { opensOn: "m300" }));
-    expect(range(result.current)).toEqual([300 - PAGE_ROWS, 300 + PAGE_ROWS + 1]);
+    expect(range(result.current)).toEqual([300 - AROUND_ROWS, 300 + AROUND_ROWS + 1]);
     const { result: gone } = renderHook(() => useRowWindow(rows(9_000), "chat-2", { opensOn: "deleted" }));
     expect(range(gone.current)).toEqual([9_000 - OPEN_ROWS, 9_000]);
   });
@@ -129,7 +155,7 @@ describe("useRowWindow", () => {
   it("holds its edges by row: a row deleted at the edge leaves the window where it was", () => {
     const ids = rows(1_000);
     const { result, rerender } = renderHook(({ ids }) => useRowWindow(ids, "chat-1"), { initialProps: { ids } });
-    for (let i = 0; i < 3; i++) act(() => { result.current.more("up"); });
+    for (let i = 0; i < FILL + 1; i++) act(() => { result.current.more("up"); });
     const [first, to] = range(result.current);
     expect(result.current.detached).toBe(true);
     // Its first row goes: the next one is first. The rows after it moved up one, and so did its last.
