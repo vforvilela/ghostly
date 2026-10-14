@@ -15,8 +15,9 @@ afterEach(() => closeWorld());
 it("15 unused invites read a few times a minute between them, and a join on one still goes live", async () => {
   const pkarr = new MemoryPkarr(DESKTOP_NETWORK);
   const made = Array.from({ length: 15 }, () => invitation());
-  // Nothing on screen: each reads at its own pace.
-  const inviters = made.map((m) => open(m.inviter, pkarr, { dht: true, active: false, pollIntervals: RELAY_POLL_INTERVALS }));
+  // One app, nothing on screen: each reads at its own pace.
+  const app = pkarr.transport();
+  const inviters = made.map((m) => open(m.inviter, pkarr, { dht: true, active: false, pollIntervals: RELAY_POLL_INTERVALS, transport: app }));
   for (const inviter of inviters) inviter.link.setChatActive(false);
   await vi.advanceTimersByTimeAsync(11 * 60_000);
   const before = pkarr.reads;
