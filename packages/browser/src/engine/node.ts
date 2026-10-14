@@ -1312,8 +1312,8 @@ export class GhostlyNode implements EngineImplementation {
     linkSeen: linkId => { const live = this.links.get(linkId); return otherEndSeen(live?.presence, live?.dataLink); },
     // Its packet is newer than the moment the edge was last up (when this device first read it, so both times are this clock's).
     linkBack: linkId => { const live = this.links.get(linkId); return !!live?.lastSyncAt && !!live.presence?.online && presenceSeenAt(live.presence) > live.lastSyncAt; },
-    publish: (identity, records, background, door) => this.groupTransport.publish(identity, records, { background, door }),
-    resolve: async (pubKeyZ32, background, door) => (await this.groupTransport.resolve(pubKeyZ32, { background, door }))?.records ?? null,
+    publish: (identity, records, background, door, signal) => this.groupTransport.publish(identity, records, { background, door, signal }),
+    resolve: async (pubKeyZ32, background, door, signal) => (await this.groupTransport.resolve(pubKeyZ32, { background, door, signal }))?.records ?? null,
     expectPeer: linkId => this.links.get(linkId)?.link?.expectPeer(),
     signalIn: (linkId, payload, direct) => !!this.links.get(linkId)?.carried?.accept(payload, direct),
     edgeSignal: linkId => this.links.get(linkId)?.carried?.latest() ?? null,
@@ -6931,8 +6931,13 @@ export class GhostlyNode implements EngineImplementation {
           try { await db.pinPeer(stored.id, key, signedSignals); }
           catch (error) { live.stored = previous; throw error; }
           // Pinned just now (not a later session or envelope confirming the same key): the record is sealed
-          // anew for the contact alone, and the contact's is read.
-          if (!previous.pairedPeerKey) { void live.caps?.update().catch(() => {}); live.caps?.refresh(true); }
+          // anew for the contact alone, and the contact's is read. The chat is a contact's now and takes its native
+          // listeners, as at start (`keepsNativeEndpoints`): an invite from before a restart had none, and a joiner
+          // with no WebRTC found nothing to dial until someone wrote in the chat.
+          if (!previous.pairedPeerKey) {
+            if (!live.stored.group && live.stored.deliveryMode !== "dht") void this.ensureNativeEndpoints(stored.id);
+            void live.caps?.update().catch(() => {}); live.caps?.refresh(true);
+          }
         },
       } : undefined,
       // A chat never paired: the one who made the invite still holds it; the one who joined does not.

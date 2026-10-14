@@ -9,6 +9,7 @@ import {
   type ApiContext, type Method, type Params,
 } from "./apiKit";
 import { FILE_METHODS } from "./files";
+import { checkShownName } from "./profiles";
 import { waitForEdit, waitForGroupFrame, waitForMessage } from "./waits";
 import { STATUS_CARD_METHODS } from "./statusCards";
 import { BUTTON_METHODS, buttonsCard, pressable } from "./buttons";
@@ -168,10 +169,7 @@ const METHODS: Record<string, Method> = {
   async "profile.set"(ctx, params) {
     const patch: Partial<Settings> = {};
     const name = params.name;
-    if (name !== undefined) {
-      if (typeof name !== "string" || [...name].length > 64) throw new CliError("bad_request", "name must be a string of up to 64 characters");
-      patch.nick = name.trim();
-    }
+    if (name !== undefined) patch.nick = checkShownName(name).trim();
     if (params.shareProfile !== undefined) patch.shareProfile = bool(params, "shareProfile");
     await node(ctx).updateSettings({ settings: patch });
     return METHODS["profile.get"](ctx, {});
@@ -709,17 +707,19 @@ function history(messages: StoredMessage[], params: Params, json: (message: Stor
   const limit = num(params, "limit", 50, { min: 1, max: 10_000, whole: true });
   const before = params.before;
   const after = params.after;
-  let list = messages.slice().sort((a, b) => a.timestamp - b.timestamp);
-  const cut = (value: unknown, side: "before" | "after") => {
+  const sorted = messages.slice().sort((a, b) => a.timestamp - b.timestamp);
+  // Each id is found in the whole history, not in what the other side already cut away: a window with nothing in it
+  // (`--after b --before b`, or crossed) is an empty page, not "No message b".
+  const bound = (value: unknown, side: "before" | "after"): ((m: StoredMessage, at: number) => boolean) | undefined => {
     if (value === undefined || value === null) return;
-    if (typeof value === "number") { list = list.filter((m) => (side === "before" ? m.timestamp < value : m.timestamp > value)); return; }
+    if (typeof value === "number") return (m) => (side === "before" ? m.timestamp < value : m.timestamp > value);
     if (typeof value !== "string") throw new CliError("bad_request", `${side} must be a timestamp or a message id`);
-    const index = list.findIndex((m) => m.id === value);
+    const index = sorted.findIndex((m) => m.id === value);
     if (index === -1) throw new CliError("not_found", `No message ${value}`);
-    list = side === "before" ? list.slice(0, index) : list.slice(index + 1);
+    return (_, at) => (side === "before" ? at < index : at > index);
   };
-  cut(before, "before");
-  cut(after, "after");
+  const bounds = [bound(before, "before"), bound(after, "after")].filter((b) => b !== undefined);
+  const list = sorted.filter((m, at) => bounds.every((within) => within(m, at)));
   const more = after !== undefined && after !== null ? list.length > limit : list.length > limit;
   const page = after !== undefined && after !== null ? list.slice(0, limit) : list.slice(-limit);
   return { messages: page.map((m) => json(m)), more };

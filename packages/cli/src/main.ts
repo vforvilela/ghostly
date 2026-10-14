@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { connect } from "node:net";
-import { openSync, readFileSync } from "node:fs";
+import { openSync, readFileSync, rmSync } from "node:fs";
 import packageJson from "../package.json" with { type: "json" };
 import { GLOBAL_OPTIONS, globalOption, liftGlobals, parseArgs, type OptionSpec, type Parsed } from "./args";
 import { connectDaemon, type DaemonClient } from "./client";
@@ -15,7 +15,7 @@ import { resolve } from "node:path";
 import { format } from "node:util";
 import { secretsFromStdin } from "./secretInput";
 import {
-  checkProfileName, createProfile, currentProfile, DEFAULT_PROFILE, ghostlyHome, listProfiles, lockOwner, profileExists, profilePaths, selectProfile,
+  checkProfileName, checkShownName, createProfile, currentProfile, DEFAULT_PROFILE, ghostlyHome, listProfiles, lockOwner, profileExists, profilePaths, selectProfile,
   type ProfilePaths,
 } from "./profiles";
 
@@ -115,6 +115,22 @@ export function readOnly(method: string, params: Record<string, unknown>): boole
   return READS.has(method);
 }
 
+/**
+ * Calls whose change stays on this device: a chat's name here, a chat removed (nothing goes to the contact), auto-answer
+ * (calls.json), a proof dropped, a web app added (shared with no one yet). Opened online, each put the profile's
+ * records on the relays and waited for them (6 PUT + 4 GET, 3.3 s with a relay that takes 1.5 s), and the contacts'
+ * apps saw this device come online. `message delete` stays online: it settles a file offer already on the DHT.
+ */
+const LOCAL_WRITES: ReadonlySet<string> = new Set(["chat.rename", "chat.remove", "call.auto", "identity.cancel", "service.add"]);
+
+/** Settings of this device only: no contact and no relay hears of them (nick, avatar and the relays' do). */
+export const LOCAL_SETTINGS: ReadonlySet<string> = new Set(["sendTyping", "autoDownloads", "serveFiles"]);
+
+/** Whether a one-shot for this call opens the profile offline: a read, or a change that stays on this device. */
+export function offlineCall(method: string, params: Record<string, unknown>): boolean {
+  return readOnly(method, params) || LOCAL_WRITES.has(method);
+}
+
 async function session(g: Globals, options: RuntimeOptions): Promise<Session> {
   requireProfile(g);
   const client = await connectDaemon(g.paths.socket);
@@ -127,7 +143,7 @@ async function session(g: Globals, options: RuntimeOptions): Promise<Session> {
 
 /**
  * How a one-shot opens the profile: `deferGroups` when the command is about one 1:1 chat (`chatOnly`) and needs
- * nothing of the groups, `offline` when it only reads (`readOnly`).
+ * nothing of the groups, `offline` when it only reads or changes only this device (`offlineCall`).
  */
 async function withSession<T>(g: Globals, work: (s: Session) => Promise<T>, options: RuntimeOptions = {}): Promise<T> {
   const s = await session(g, options);
@@ -288,12 +304,20 @@ async function profileCommand(sub: string | undefined, argv: string[]): Promise<
     case "create": {
       const [name] = parsed.positionals;
       if (!name || parsed.positionals.length > 1) throw new CliError("usage", "ghostly profile create <name>");
+      // A command that fails changes nothing: the name is checked before the folder is made, and the profile is made
+      // current only once it holds it. Before, the retry with a good name was refused "Profile <name> exists".
+      const shownName = parsed.options.name === undefined ? undefined : checkShownName(parsed.options.name);
       const paths = createProfile(g.home, name);
-      if (parsed.options.use) selectProfile(g.home, name);
       let shown: unknown = null;
-      if (typeof parsed.options.name === "string") {
-        shown = await withSession({ ...g, profile: name, paths }, (s) => s.call("profile.set", { name: parsed.options.name }));
+      if (shownName !== undefined) {
+        try {
+          shown = await withSession({ ...g, profile: name, paths }, (s) => s.call("profile.set", { name: shownName }));
+        } catch (e) {
+          rmSync(paths.dir, { recursive: true, force: true });
+          throw e;
+        }
       }
+      if (parsed.options.use) selectProfile(g.home, name);
       print({ created: name, folder: paths.dir, current: currentProfile(g.home) === name, ...(shown ? { profile: shown } : {}) });
       return;
     }
@@ -644,7 +668,7 @@ async function settingsCommand(sub: string | undefined, argv: string[]): Promise
     try { parsedValue = JSON.parse(value); } catch { parsedValue = value; }
     // A text setting (nick) keeps the word as given when it reads as JSON of another kind (2024, true, null).
     if ((await engineApi()).SETTABLE[key] === "string" && typeof parsedValue !== "string") parsedValue = value;
-    printAnswer(await withSession(g, (s) => s.call("settings.set", { [key]: parsedValue })) as Record<string, unknown>);
+    printAnswer(await withSession(g, (s) => s.call("settings.set", { [key]: parsedValue }), { offline: LOCAL_SETTINGS.has(key) }) as Record<string, unknown>);
     return;
   }
   throw new CliError("usage", "ghostly settings get | settings set <key> <json-value>");
@@ -758,7 +782,7 @@ async function tableCommand(name: string, argv: string[]): Promise<void> {
       await s.call("chat.wait", { chat: result.chat, until: "paired", timeout: 60 }).catch(() => {});
     }
     return result;
-  }, { deferGroups: chatOnly(command.method, params), offline: readOnly(command.method, params) });
+  }, { deferGroups: chatOnly(command.method, params), offline: offlineCall(command.method, params) });
   printAnswer(result);
 }
 
