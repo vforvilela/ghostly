@@ -1077,8 +1077,8 @@ export class GhostLink {
           if (presence.online) this.tracker?.sawPeer();
           this.peerPacketArrived(presence);
           // A first contact under way, or a joined chat whose inviter never answered (read at its unused-invite wait): a
-          // fresh packet of the contact says its envelope is a read away.
-          if (presence.online && (!options.pairing?.credentials.peerKey || this.dht?.unanswered) && Date.now() - presenceSeenAt(presence) < EXPECT_PEER_MS) this.dht?.expect();
+          // fresh packet of the contact says its envelope is a read away. Not once the invite was taken (`takenFromUs`).
+          if (presence.online && (!options.pairing?.credentials.peerKey || this.dht?.unanswered) && !this.takenFromUs && Date.now() - presenceSeenAt(presence) < EXPECT_PEER_MS) this.dht?.expect();
           events.onPresence?.(this.mergePresence(presence));
           this.peerMayHaveLeftDht(presence);
           this.maybeAutoConnect(presence);
@@ -1469,6 +1469,8 @@ export class GhostLink {
     return this.mergePresence(this.session.peerPresence);
   }
 
+  /** Someone else used the invite first, and this side never pinned its inviter: there is nobody to pair with. */
+  private get takenFromUs(): boolean { return !this.options.pairing?.credentials.peerKey && !!this.dht?.inviteTaken; }
   private get streamBlocked(): boolean { return this.deliveryMode === "dht" || this.dht?.peerMode === "dht"; }
   /**
    * A stream authenticated a participation key other than the pinned one: a security rejection, which stops the chat
@@ -2844,6 +2846,10 @@ export class GhostLink {
   private maybeAutoConnect(presence: PeerPresence): void {
     // Stopping (its loops end after an await): a poll finishing meanwhile must not dial again.
     if (this.stopped || this.leaving || this.yielding || this.streamBlocked || this.keyStopped || !this.options.autoConnect || !presence.online || this.channel || this.dialing || this.dataLink.state !== "idle") return;
+    // The invite was taken before this side pinned anyone: its inviter answers nobody here, and neither a dial nor a fast
+    // look for its offer is worth the relays' budget at each of its heartbeats (bug hunt 1014-1317). The mailbox's slow
+    // read still hears it if it was not so (`untaken`), and dials go again then.
+    if (this.takenFromUs) return;
     // On the DHT the chat is usable: layer 1 is retried at the background pace (WISP 100), not the pairing's.
     // A pin over the DHT alone changes nothing here: the joiner still knocks and the inviter still answers.
     // Back after a restart on a native transport whose endpoint is still starting: it is knocked on once it has, and a
