@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import { LIMITS, createIdentity, dhtFileId, type FileSink, type GhostLinkOptions } from "@ghostly/core";
 import { GROUP_IROH_WEB_SLOTS, GROUP_NATIVE_SLOTS, GhostlyNode, NATIVE_HOLD_MS, RESUME_SPENT_MS, type NodeOptions } from "../src/engine/node";
 import { db } from "../src/engine/db";
+import { setJoinTraceSink } from "../src/engine/joinTrace";
 import { EditQueue } from "../src/engine/edits";
 import { STORES, fileStore, transact } from "../src/shared/idb";
 import { storedBlob } from "../src/shared/storedFiles";
@@ -54,6 +55,7 @@ vi.mock("@ghostly/core", async (importOriginal) => {
     start = vi.fn();
     stop = vi.fn(async () => {});
     wake = vi.fn();
+    expectPeer = vi.fn();
     depart = vi.fn();
     connect = vi.fn(async () => {});
     disconnect = vi.fn();
@@ -1561,6 +1563,37 @@ describe("private groups through the engine", () => {
       first.options.events.onAnswersRefused();
       await node["nativeQueue"];
       expect(edgeOf(refused)).toBe(again);
+      expect(iroh).toHaveBeenCalledOnce();
+    });
+
+    // A joiner or an admin behind a VPN: the admin's packet was seen on the entry session, which never went live, and the
+    // join stayed at "Let in: getting the group's keys" until it was cancelled (2026-10-16).
+    it.each(["guest", "host"] as const)("an entry session (%s side) whose WebRTC connects nothing goes on over a native transport, as an edge does", async (role) => {
+      vi.stubGlobal("RTCPeerConnection", class {});
+      onTestFinished(() => { vi.unstubAllGlobals(); });
+      const { node, iroh } = await nativeEngine();
+      vi.spyOn(node["groups"], "tick").mockResolvedValue();
+      const { groupId } = await node.createGroup({ name: "Plaza" });
+      const me = createIdentity(), other = createIdentity();
+      const entryId = await node["openEntry"]({ g: groupId, host: other.pubKeyZ32 }, role, me.seedB64, other.pubKeyZ32);
+      await node["nativeQueue"];
+      expect(iroh).not.toHaveBeenCalled();
+      const first = edgeOf(entryId);
+      expect(first.options.rtcAvailable).toBe(true);
+      // Said in the join's trace, which a CLI daemon writes to its log.
+      const traced: string[] = [];
+      setJoinTraceSink((line) => traced.push(JSON.parse(line).step));
+      onTestFinished(() => { setJoinTraceSink(null); });
+      first.options.events.onDirectEvidence("no-path");
+      await vi.waitFor(() => expect(edgeOf(entryId)).not.toBe(first));
+      expect(first.stop).toHaveBeenCalledWith(false);
+      const again = edgeOf(entryId);
+      expect(again.options.rtcAvailable).toBe(false);
+      // Still the one admission it carries, on the same pinned session.
+      expect(again.options).toMatchObject({ oneShot: true, paymentMethods: { cashu: false } });
+      expect(again.expectPeer).toHaveBeenCalled();
+      expect(traced).toContain("link.native");
+      await vi.waitFor(() => expect(again.registerEndpoint).toHaveBeenCalledOnce());
       expect(iroh).toHaveBeenCalledOnce();
     });
 

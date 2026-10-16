@@ -6817,12 +6817,12 @@ export class GhostlyNode implements EngineImplementation {
         onPairingState: state => { live.pairing = state; this.emitState(); },
         onDirectEvidence: evidence => {
           this.directPath.note(peer, evidence);
-          if (!entry && evidence !== "open" && evidence !== "closed") void this.edgeWithoutRtc(linkId);
+          if (evidence !== "open" && evidence !== "closed") void this.edgeWithoutRtc(linkId);
         },
         // WebRTC here refused every answer to the edge's offers, through the pauses after them: the next offer would
         // wait minutes of backoff while the member is there. The edge goes on over a native transport for this run, as
         // one whose WebRTC connected nothing does.
-        onAnswersRefused: () => { if (!entry) void this.edgeWithoutRtc(linkId); },
+        onAnswersRefused: () => { void this.edgeWithoutRtc(linkId); },
         onDataLinkState: state => {
           traceJoin(group, `link.${state}`, { role });
           // The last moment the member was reachable on it: when it opens, and when it stops being open.
@@ -6865,13 +6865,16 @@ export class GhostlyNode implements EngineImplementation {
    * app with no WebRTC (WISP 902 § Transports): it runs its native endpoints and says so in its packet (`_tr`, with no
    * `webrtc/1`), the member's app starts its own for it as it does for a Linux Desktop, and the two meet over Iroh
    * through its relay. Until the member comes back (`edgeRtcPresence`), or for this run of the app.
+   * An entry session of a group's link too: there, the admin's packet was seen and the session never went live, and the
+   * join stayed at "Let in: getting the group's keys" for as long as the joiner waited (2026-10-16).
    */
   private async edgeWithoutRtc(linkId: string): Promise<void> {
     const live = this.links.get(linkId);
-    if (!live?.link || !live.stored.group || live.stored.groupEntry || this.shuttingDown || this.options.webrtcGroupLinks) return;
+    if (!live?.link || !live.stored.group || this.shuttingDown || this.options.webrtcGroupLinks) return;
     if (this.edgeRtcOff.has(linkId) || this.keepsGroupNative(live.stored) || !Object.keys(this.nativeFactories).length) return;
     this.edgeRtcOff.set(linkId, { away: false });
     traceLink(live.myPubKeyZ32, "edge-rtc-off", {});
+    if (live.stored.groupEntry) traceJoin(live.stored.group, "link.native", { role: live.stored.groupEntry });
     await this.restartEdge(linkId);
   }
 
@@ -6907,6 +6910,8 @@ export class GhostlyNode implements EngineImplementation {
     await link.stop(false).catch(() => {});
     if (this.links.get(linkId) !== live || live.link || this.shuttingDown || !this.networkOn) return;
     this.startEdge(linkId);
+    // An entry session's other side is there now: its packet, with the transports it starts for this one, is looked for fast.
+    if (live.stored.groupEntry) this.links.get(linkId)?.link?.expectPeer();
   }
 
   private startLink(linkId: string, messages: StoredMessage[]): void {
