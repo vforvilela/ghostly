@@ -92,6 +92,13 @@ async function asset(key: string, request: Request, event: ExtendableEvent): Pro
 
 let held: { item: SharedItem; done: () => void } | null = null;
 
+/** Holds a share for the page that asks for it, in place of one held before; `done` once it is taken or dropped. */
+function hold(item: SharedItem, done: () => void): void {
+  held?.done();
+  held = { item, done };
+  setTimeout(() => { if (held?.done === done) { held = null; done(); } }, SHARE_HOLD_MS);
+}
+
 function share(event: FetchEvent): void {
   let done = () => {};
   const delivered = new Promise<void>((resolve) => { done = resolve; });
@@ -102,9 +109,7 @@ function share(event: FetchEvent): void {
       if (!body) throw new Error("share too large");
       const type = event.request.headers.get("content-type") ?? "";
       const item = readShare(await new Response(body, { headers: { "content-type": type } }).formData());
-      held?.done();
-      held = { item, done };
-      setTimeout(() => { if (held?.done === done) { held = null; done(); } }, SHARE_HOLD_MS);
+      hold(item, done);
     } catch {
       done();
     }
@@ -121,6 +126,12 @@ worker.addEventListener("message", (event) => {
   if (message.type === "open-notification") {
     if (PUSH_PROFILE === null || typeof message.tag !== "string") return;
     event.waitUntil(worker.registration.getNotifications({ tag: message.tag }).then(([shown]) => (shown ? openFrom(shown) : undefined)));
+    return;
+  }
+  if (message.type === "share-keep") {
+    if (PUSH_PROFILE !== null || !message.item || typeof message.item !== "object") return;
+    // The worker stays up while it waits again, as a share just posted does.
+    event.waitUntil(new Promise<void>((resolve) => hold(message.item, resolve)));
     return;
   }
   const source = event.source;
