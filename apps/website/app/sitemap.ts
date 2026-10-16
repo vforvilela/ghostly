@@ -25,6 +25,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     entry("/cli", 0.7),
     entry("/developers/agents", 0.7),
     entry("/brand", 0.4, "yearly"),
+    entry("/contact-link", 0.5, "yearly"),
     entry("/privacy", 0.3, "yearly"),
     entry("/terms", 0.3, "yearly"),
   ];
